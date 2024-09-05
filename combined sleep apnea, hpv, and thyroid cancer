@@ -1,0 +1,193 @@
+import praw
+import pandas as pd
+from datetime import datetime, timezone
+import time
+import os
+import random
+import logging
+
+# Set up logging
+logging.basicConfig(filename='reddit_scraper.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Set up your Reddit app credentials
+reddit = praw.Reddit(
+    client_id='vhDZR2_kytfFpLQdJyQoag',
+    client_secret='y9_Fl6Wqzf-v3PuKE3hl5oW4QdeD5g',
+    user_agent='MyRedditScraper/0.1 by Own_Base_5128'
+)
+
+# Function to recursively get all comments and replies
+def get_comments(comment, submission, subreddit_name):
+    comments_data = []
+    comment_data = {
+        'Subreddit': subreddit_name,
+        'Post Title': submission.title,
+        'Post Body': submission.selftext,
+        'Post Date': datetime.fromtimestamp(submission.created_utc, timezone.utc),
+        'Post Upvotes': submission.score,
+        'Post Downvotes': submission.score - submission.ups,
+        'Post ID': submission.id,
+        'Post Flair': submission.link_flair_text,
+        'Comment Body': comment.body,
+        'Comment Date': datetime.fromtimestamp(comment.created_utc, timezone.utc),
+        'Comment Upvotes': comment.score,
+        'Comment Downvotes': comment.score - comment.ups,
+        'Parent Comment ID': comment.parent_id,
+        'Comment ID': comment.id,
+        'Post Author': submission.author.name if submission.author else 'N/A',
+        'Comment Author': comment.author.name if comment.author else 'N/A'
+    }
+    comments_data.append(comment_data)
+
+    for reply in comment.replies:
+        comments_data.extend(get_comments(reply, submission, subreddit_name))
+
+    return comments_data
+
+# Function to handle rate limits and fetch posts and comments
+def get_all_posts_and_comments(subreddit_name, keywords=None, start_date=None, end_date=None, max_retries=5):
+    subreddit = reddit.subreddit(subreddit_name)
+    posts_data = []
+
+    retries = 0
+    while True:
+        try:
+            for submission in subreddit.new(limit=None):  # Iterate through new posts
+                if start_date and datetime.fromtimestamp(submission.created_utc, timezone.utc) < start_date:
+                    return posts_data  # End of data within date range
+                if end_date and datetime.fromtimestamp(submission.created_utc, timezone.utc) > end_date:
+                    continue  # Skip if post is newer than the end_date
+
+                if keywords and not any(keyword in submission.title.lower() or keyword in submission.selftext.lower() for keyword in keywords):
+                    continue  # Skip if post does not match any keyword
+
+                submission_data = {
+                    'Subreddit': subreddit_name,
+                    'Post Title': submission.title,
+                    'Post Body': submission.selftext,
+                    'Post Date': datetime.fromtimestamp(submission.created_utc, timezone.utc),
+                    'Post Upvotes': submission.score,
+                    'Post Downvotes': submission.score - submission.ups,
+                    'Post ID': submission.id,
+                    'Post Flair': submission.link_flair_text,
+                    'Comment Body': None,
+                    'Comment Date': None,
+                    'Comment Upvotes': None,
+                    'Comment Downvotes': None,
+                    'Parent Comment ID': None,
+                    'Comment ID': None,
+                    'Post Author': submission.author.name if submission.author else 'N/A',
+                    'Comment Author': None
+                }
+                posts_data.append(submission_data)
+
+                submission.comments.replace_more(limit=None)  # No limit for comments
+                for comment in submission.comments.list():
+                    posts_data.extend(get_comments(comment, submission, subreddit_name))
+
+                # Sleep for a random time between 1 and 3 seconds between each post to avoid rate limits
+                time.sleep(random.uniform(1, 3))
+
+                # Display progress in terminal
+                print(f"Collected post: {submission.title}")
+
+        except praw.exceptions.APIException as e:
+            if 'RATELIMIT' in str(e):
+                retries += 1
+                if retries <= max_retries:
+                    sleep_time = 2 ** retries  # Exponential backoff
+                    print(f"Rate limit hit. Sleeping for {sleep_time} seconds.")
+                    logging.warning(f"Rate limit hit. Sleeping for {sleep_time} seconds.")
+                    time.sleep(sleep_time)
+                else:
+                    print("Max retries exceeded. Exiting.")
+                    logging.error("Max retries exceeded. Exiting.")
+                    return posts_data
+            else:
+                print(f"APIException occurred: {e}")
+                logging.error(f"APIException occurred: {e}")
+                return posts_data
+
+        except praw.exceptions.ClientException as e:
+            print(f"ClientException occurred: {e}")
+            logging.error(f"ClientException occurred: {e}")
+            return posts_data
+
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            logging.error(f"An unexpected error occurred: {e}")
+            return posts_data
+
+# Collect data from r/HPV
+print("Collecting data from r/HPV...")
+logging.info("Collecting data from r/HPV...")
+keywords_hp = ['vaccine']
+posts_data_hp = get_all_posts_and_comments('HPV', keywords=keywords_hp)
+df_hp = pd.DataFrame(posts_data_hp)
+
+# Save r/HPV data to Excel
+output_directory_hp = r"C:\Users\Sean Setzen\OneDrive - Albany Medical Center\Desktop\Python Code\HPV\Excel Files"
+os.makedirs(output_directory_hp, exist_ok=True)  # Create the directory if it doesn't exist
+excel_file_hp = os.path.join(output_directory_hp, 'HPV_Subreddit_Vaccine_Posts_and_Comments.xlsx')
+df_hp.to_excel(excel_file_hp, index=False)
+
+# Summary for r/HPV
+unique_posts_hp = df_hp['Post ID'].nunique()
+unique_comments_hp = df_hp['Comment ID'].nunique()
+date_range_hp = (df_hp['Post Date'].min(), df_hp['Post Date'].max())
+unique_post_authors_hp = df_hp['Post Author'].nunique()
+unique_comment_authors_hp = df_hp['Comment Author'].nunique()
+unique_users_hp = pd.concat([df_hp['Post Author'], df_hp['Comment Author']]).nunique()
+
+summary_data_hp = {
+    'Unique Posts': [unique_posts_hp],
+    'Unique Comments': [unique_comments_hp],
+    'Unique Post Authors': [unique_post_authors_hp],
+    'Unique Comment Authors': [unique_comment_authors_hp],
+    'Total Unique Users': [unique_users_hp],
+    'Date Range Start': [date_range_hp[0]],
+    'Date Range End': [date_range_hp[1]],
+    'Subreddit Creation Date': [datetime.fromtimestamp(reddit.subreddit('HPV').created_utc, timezone.utc)]
+}
+
+summary_df_hp = pd.DataFrame(summary_data_hp)
+with pd.ExcelWriter(excel_file_hp, engine='openpyxl', mode='a') as writer:
+    summary_df_hp.to_excel(writer, sheet_name='Summary', index=False)
+
+print(f'The posts, comments, and summary information for r/HPV have been saved to {excel_file_hp}.')
+logging.info(f'The posts, comments, and summary information for r/HPV have been saved to {excel_file_hp}.')
+
+# Collect data from r/SleepApnea
+print("Collecting data from r/SleepApnea...")
+logging.info("Collecting data from r/SleepApnea...")
+keywords_sa = ['inspire', 'hgns', 'hsn', 'hypoglossal nerve stimulator', 'uas', 'upper stimulation', 'hypoglossal nerve stimulation implant', 'hypoglossal nerve stimulation']
+posts_data_sa = get_all_posts_and_comments('SleepApnea', keywords=keywords_sa)
+df_sa = pd.DataFrame(posts_data_sa)
+
+# Save r/SleepApnea data to Excel
+output_directory_sa = r"C:\Users\Sean Setzen\OneDrive - Albany Medical Center\Desktop\Python Code\r\SleepApnea Subreddit"
+os.makedirs(output_directory_sa, exist_ok=True)  # Create the directory if it doesn't exist
+excel_file_sa = os.path.join(output_directory_sa, 'Inspire_Mentions.xlsx')
+df_sa.to_excel(excel_file_sa, index=False)
+
+# Summary for r/SleepApnea
+unique_posts_sa = df_sa['Post ID'].nunique()
+unique_comments_sa = df_sa['Comment ID'].nunique()
+date_range_sa = (df_sa['Post Date'].min(), df_sa['Post Date'].max())
+unique_post_authors_sa = df_sa['Post Author'].nunique()
+unique_comment_authors_sa = df_sa['Comment Author'].nunique()
+unique_users_sa = pd.concat([df_sa['Post Author'], df_sa['Comment Author']]).nunique()
+
+summary_data_sa = {
+    'Unique Posts': [unique_posts_sa],
+    'Unique Comments': [unique_comments_sa],
+    'Unique Post Authors': [unique_post_authors_sa],
+    'Unique Comment Authors': [unique_comment_authors_sa],
+    'Total Unique Users': [unique_users_sa],
+    'Date Range Start': [date_range_sa[0]],
+    'Date Range End': [date_range_sa[1]],
+    'Subreddit Creation Date': [datetime.fromtimestamp(reddit.subreddit('SleepApnea').created_utc, timezone.utc)]
+}
+
+summary_df_sa = pd.DataFrame(summary_data_sa)
+with pd.ExcelWriter(excel_file_sa, engine='openpyxl',
